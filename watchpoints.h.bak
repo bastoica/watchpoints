@@ -1,0 +1,195 @@
+#ifndef WATCHPOINTS_H
+#define WATCHPOINTS_H
+
+#define DEVICE_NAME "watchpoints"
+
+#define ADD_WATCHPOINT      (0x1000)
+#define POLL_WATCHPOINT     (0x2000)
+#define REMOVE_WATCHPOINT   (0x4000)
+#define CLEAN_KMODULE       (0x8000)
+
+#define MAX_BUF_LEN         (0x400)
+
+typedef struct _wp_msg_t {
+	uint64_t data_ptr;
+	uint32_t data_size;
+} wp_msg_t;
+
+/******************************************/
+
+#define HASH_BIT_SIZE       (12) /* 4096 */
+#define EXISTING_KEY        (0)
+
+typedef struct _hash_entry_t {
+  uint64_t key;
+  uint32_t timestamp;
+  struct list_head next;
+} hash_entry_t;
+
+typedef struct _hash_t {
+  uint32_t size;
+  hash_entry_t buckets[1<<HASH_BIT_SIZE];
+} hash_t;
+
+typedef struct _mem_acc_t {
+  uint64_t pc;
+  uint32_t timestamp;
+} mem_acc_t;
+
+uint32_t GLOBAL_TIMESTAMP;
+
+static uint32_t hasht_get_bucket(uint64_t k);
+static int hasht_init(hash_t *h);
+static int hasht_add(hash_t *h, uint64_t key);
+static int hasht_search(hash_t *h, uint64_t key);
+static int hasht_copy_to_user(hash_t *h, void __user *arr);
+static int hasht_clear(hash_t *h);
+
+static uint32_t hasht_get_bucket(uint64_t k) {
+
+  uint32_t iter = 0;
+  uint32_t len = 0;
+  uint64_t hash = 0xcbf29ce484222325ULL;
+  uint32_t total_buckets = (1<<HASH_BIT_SIZE);
+  uint8_t key[32];
+
+  memset(key, '\0', sizeof(key));
+  sprintf(key, "%llu", k);
+  len = strlen(key);
+
+  for (iter = 0; iter < len; ++iter) {
+
+    hash = (hash ^ (uint8_t)(key[iter]));
+    hash += ((hash << 1) + (hash << 4) + (hash << 5) +
+             (hash << 7) + (hash << 8) + (hash << 40));
+  }
+
+  /* Fit everything in 1<<HASH_BIT_SIZE buckets */
+  hash = hash & (total_buckets - 1);
+
+  return hash;
+}
+
+static int hasht_init(hash_t *h) {
+
+  uint32_t iter = 0;
+  uint32_t total_buckets = (1<<HASH_BIT_SIZE);
+
+  h->size = 0;
+  for (iter = 0; iter < total_buckets; ++iter) {
+    INIT_LIST_HEAD(&h->buckets[iter].next);
+  }
+
+  GLOBAL_TIMESTAMP = 0;
+
+  /* FIXME: Check return code. Add error codes. */
+  return 0;
+}
+
+static int hasht_add(hash_t *h, uint64_t key) {
+
+  hash_entry_t *entry = NULL;
+  uint32_t hash = 0;
+
+ if (hasht_search(h, key)) {
+    // FIXME: Check return code. Add error codes.
+    return EXISTING_KEY;
+  }
+
+  entry = kmalloc(sizeof(*entry), 0);
+  entry->key = key;
+  entry->timestamp = ++GLOBAL_TIMESTAMP;
+
+  hash = hasht_get_bucket(key);
+  list_add_tail(&(entry->next), &h->buckets[hash].next);
+  h->size = h->size + 1;
+
+  /* FIXME: Check return code. Add error codes. */
+  return 0;
+}
+
+static int hasht_search(hash_t *h, uint64_t key) {
+
+  hash_entry_t *entry;
+  uint32_t hash = 0;
+
+  hash = hasht_get_bucket(key);
+
+  list_for_each_entry(entry, &h->buckets[hash].next, next) {
+    if (entry->key == key) {
+      return 1;
+    }
+  }
+
+  /* FIXME: Check return code. Add error codes. */
+  return 0;
+}
+
+static int hasht_copy_to_user(hash_t *h, void __user *ptr) {
+
+  hash_entry_t *entry = NULL;
+  uint32_t len = 0;
+  uint32_t iter = 0;
+  uint32_t bytes;
+  uint32_t total_buckets = (1<<HASH_BIT_SIZE);
+  mem_acc_t mem_acc;
+
+  for (iter = 0; len < MAX_BUF_LEN && iter < total_buckets; ++iter) {
+
+    list_for_each_entry(entry, &h->buckets[iter].next, next) {
+
+      pr_info("Copying (%llx, %lu)\n",
+        (long long unsigned int)entry->key, (long unsigned int)entry->timestamp);
+      mem_acc.pc = entry->key;
+      mem_acc.timestamp = entry->timestamp;
+      bytes = copy_to_user((void __user *)ptr, &mem_acc, sizeof(mem_acc));
+      if (bytes) {
+        pr_info("copy_to_user() failed copying %u out of %u bytes\n",
+          (unsigned int)bytes, (unsigned int)sizeof(mem_acc));
+        return 0;
+      }
+      len++;
+      ptr += sizeof(mem_acc);
+
+      if (len >= MAX_BUF_LEN) {
+        pr_info("We have reached the maximum allocated capacity for the kernel buffer\n");
+        return 0;
+      }
+    }
+  }
+
+  /* FIXME: Check return code. Add error codes. */
+  return 0;
+}
+
+static int hasht_clear(hash_t *h) {
+
+  hash_entry_t *entry = NULL;
+  hash_entry_t *temp = NULL;
+  size_t mem_used = 0;
+  uint32_t iter = 0;
+  uint32_t total_buckets = (1<<HASH_BIT_SIZE);
+
+  if (h == NULL) {
+    return 0;
+  }
+
+  GLOBAL_TIMESTAMP = 0;
+
+  for (iter = 0; iter < total_buckets; ++iter) {
+
+    list_for_each_entry_safe(entry, temp, &h->buckets[iter].next, next) {
+
+      mem_used += ksize(entry);
+      list_del(&entry->next);
+      kfree(entry);
+    }
+  }
+
+  h->size = 0;
+
+  /* FIXME: Check return code. Add error codes. */
+  return mem_used;
+}
+
+#endif
