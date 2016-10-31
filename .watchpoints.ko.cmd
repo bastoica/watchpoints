@@ -1,0 +1,1 @@
+cmd_/home/bastoica/watchpoints-kmodule/watchpoints.ko := ld -r -m elf_x86_64 -T ./scripts/module-common.lds --build-id  -o /home/bastoica/watchpoints-kmodule/watchpoints.ko /home/bastoica/watchpoints-kmodule/watchpoints.o /home/bastoica/watchpoints-kmodule/watchpoints.mod.o
