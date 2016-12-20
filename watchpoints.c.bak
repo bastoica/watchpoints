@@ -60,7 +60,7 @@ watchpoint_handler(struct perf_event *bp, struct perf_sample_data *data,
 
 /* handles the ioctl event */
 static long
-watchpoints_ioctl(struct file *file, unsigned int cmd,
+watchpoint_ioctl(struct file *file, unsigned int cmd,
             unsigned long user_msg);
 
 /* initialization function for the module */
@@ -85,15 +85,15 @@ add_mem_loc_entry(struct perf_event *event, long size);
 
 /* adds a new watchpoint */
 static long
-add_watchpoint(wp_msg_t *wp);
+watchpoint_add(wp_msg_t *wp);
 
 /* probe a watchpoint for memory accesses */
 static long
-poll_watchpoint(wp_msg_t *wp, uint64_t ubuff);
+watchpoint_poll(wp_msg_t *wp, uint64_t ubuff);
 
 /* removes a watchpoint */
 static long
-remove_watchpoint(wp_msg_t *wp);
+watchpoint_remove(wp_msg_t *wp);
 
 /* frees all changes recorded and returns the size used by the data */
 static size_t
@@ -157,7 +157,7 @@ const struct file_operations ctrl_fops = {
   .owner = THIS_MODULE,
   .read = NULL,
   .write = NULL,
-  .unlocked_ioctl = watchpoints_ioctl,
+  .unlocked_ioctl = watchpoint_ioctl,
   .open = NULL,
   .release = NULL,
 };
@@ -371,7 +371,7 @@ static struct perf_event*
   return perf_watchpoint;
 }
 
-static long add_watchpoint(wp_msg_t *wp) {
+static long watchpoint_add(wp_msg_t *wp) {
 
   struct perf_event *perf_watchpoint;
 
@@ -394,7 +394,7 @@ static long add_watchpoint(wp_msg_t *wp) {
   return 0;
 }
 
-static long poll_watchpoint(wp_msg_t *wp, uint64_t ubuff) {
+static long watchpoint_poll(wp_msg_t *wp, uint64_t ubuff) {
 
   struct mem_loc_list *pointer;
   size_t memory_used = 0;
@@ -415,7 +415,7 @@ static long poll_watchpoint(wp_msg_t *wp, uint64_t ubuff) {
   return 0;
 }
 
-static long remove_watchpoint(wp_msg_t *wp) {
+static long watchpoint_remove(wp_msg_t *wp) {
 
   struct mem_loc_list *pointer;
   size_t memory_used = 0;
@@ -444,7 +444,7 @@ static long remove_watchpoint(wp_msg_t *wp) {
 int no_wathcpoints = 0;
 int no_clean_calls = 0;
 
-static long watchpoints_ioctl(struct file *file, unsigned int cmd,
+static long watchpoint_ioctl(struct file *file, unsigned int cmd,
                 unsigned long user_msg) {
 
   usr_msg_t usr;
@@ -462,16 +462,16 @@ static long watchpoints_ioctl(struct file *file, unsigned int cmd,
 
   switch (cmd) {
     case ADD_WATCHPOINT:
-      ret_val = add_watchpoint(&usr.wp);
+      ret_val = watchpoint_add(&usr.wp);
       no_wathcpoints += (ret_val == 0);
       pr_info("[kernel-space] Done adding with outcome %d\n", (int)ret_val);
       break;
     case POLL_WATCHPOINT:
-      ret_val = poll_watchpoint(&usr.wp, usr.ubuff);
+      ret_val = watchpoint_poll(&usr.wp, usr.ubuff);
       pr_info("[kernel-space] Done polling with outcome %d\n", (int)ret_val);
       break;
     case REMOVE_WATCHPOINT:
-      ret_val = remove_watchpoint(&usr.wp);
+      ret_val = watchpoint_remove(&usr.wp);
       no_wathcpoints -= (ret_val == 0);
       pr_info("[kernel-space] Done removing with outcome %d\n", (int)ret_val);
       break;
