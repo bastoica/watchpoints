@@ -1,6 +1,8 @@
 /* */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#undef DEBUG
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -13,6 +15,7 @@
 #include <linux/proc_fs.h>
 #include <linux/miscdevice.h>
 #include <linux/ptrace.h>
+#include <linux/spinlock.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <asm/user_64.h>
@@ -23,7 +26,7 @@
 
 MODULE_AUTHOR("Bogdan-Alexandru Stoica <bogdan.stoica@epfl.ch>");
 MODULE_DESCRIPTION
-    ("Set watchpoints from proc without going through ptrace");
+        ("Set watchpoints from proc without going through ptrace");
 MODULE_LICENSE("GPL");
 
 #define DEVICE_NAME "watchpoints"
@@ -32,462 +35,495 @@ MODULE_LICENSE("GPL");
  * Globals declaration
  */
 
-/* file operations for the watchpoint entry in /dev */
+/* file operations for the watchpoint unit in /dev */
 const struct file_operations ctrl_fops = {
-  .owner = THIS_MODULE,
-  .read = NULL,
-  .write = NULL,
-  .unlocked_ioctl = watchpoint_ioctl,
-  .open = NULL,
-  .release = NULL,
+    .owner = THIS_MODULE,
+    .read = NULL,
+    .write = NULL,
+    .unlocked_ioctl = watchpoint_ioctl,
+    .open = NULL,
+    .release = proc_crash,
 };
 
-/* informations about the watchpoint entry in /dev */
+/* informations about the watchpoint unit in /dev */
 struct miscdevice watchpoints_misc = {
-  .minor = MISC_DYNAMIC_MINOR,
-  .name = DEVICE_NAME,
-  .fops = &ctrl_fops
+    .minor = MISC_DYNAMIC_MINOR,
+    .name = DEVICE_NAME,
+    .fops = &ctrl_fops
 };
 
 /* file operations for the pointer entries in /proc/watchpoints/pid */
 const struct file_operations proc_fops = {
-  .owner = THIS_MODULE,
-  .open = proc_open,
-  .read = seq_read,
-  .llseek = seq_lseek,
-  .release = single_release
+    .owner = THIS_MODULE,
+    .open = proc_open,
+    .read = seq_read,
+    .llseek = seq_lseek,
+    .release = single_release
 };
 
-/* entry in the proc directory for the module */
-proc_dir_entry *proc_watchpoints;
+/* unit in the proc directory for the module */
+struct proc_dir_entry *proc_watchpoints;
 
 /* centralizes everything that is tracked by the module */
-kmodule_context *tracked_pids[1<<HBITS];
+wpcontext_t wpcontext;
 
 // TODO: Add #ifdef macros for debugging
 
 /* register the initialization and cleanup functions */
-module_init(watchpoint_init);
-module_exit(watchpoint_exit);
+module_init(wpmodule_init);
+module_exit(wpmodule_exit);
 
-inline
-uint32_t fnv_hash(uint64_t pid) {
+#ifdef DEBUG
+static int
+wplist_print(void) {
 
-  uint64_t hval64 = FNV_INIT;
-  uint32_t hval = 0;
+    proc_context_t *proc;
+    int i;
 
-  while (pid > 0) {
-    hval64 = (hval64 * FNV_MULT) ^ (pid % 10);
-    pid /= 10;
-  }
-  hval = hval64 & ( (1 << HBITS) - 1 );
+    if (current->pid >= MAX_PIDS) return 0;
 
-  return hval;
+    proc = wpcontext.traced_pids[current->pid];
+    if (proc == NULL) {
+        return 0;
+    }
+
+    pr_info("--- Watchpoint list (PID %d) ---\n", current->pid);
+    for (i = 0; i < INTEL_HW_WP; ++i) {
+        if (proc->watched[i].active != NULL) {
+            pr_info("0x%llx", proc->watched[i].active->attr.bp_addr);
+        }
+    }
+
+    return 0;
 }
+#endif /* DEBUG */
 
 static int
-__init watchpoint_init(void) {
+__init wpmodule_init(void) {
 
-  int i;
+    int i;
 
-  for (i = 0; i < (1<<HBITS); ++i) {
-    tracked_pids[i] = NULL;
-  }
+    for (i = 0; i < MAX_PIDS; ++i) {
+        wpcontext.traced_pids[i] = NULL;
+    }
 
-  proc_watchpoints = proc_mkdir("watchpoints", NULL);
-  misc_register(&watchpoints_misc);
+    proc_watchpoints = proc_mkdir("watchpoints", NULL);
+    misc_register(&watchpoints_misc);
 
-  pr_err("[kernel-space]: module successfully loaded\n");
+    pr_info("module successfully loaded\n");
 
-  return 0;
+    return 0;
 }
 
 
 static void
-__exit watchpoint_exit(void) {
+__exit wpmodule_exit(void) {
 
-  int rval = 0;
+    int pid;
 
-  rval = clean_kmodule_context();
-  remove_proc_entry("watchpoints", NULL);
-  misc_deregister(&watchpoints_misc);
-  pr_err("[kernel-space]: module successfully unloaded\n");
+    for (pid = 0; pid < MAX_PIDS; ++pid) {
+        proc_free(pid);
+    }
+    remove_proc_entry("watchpoints", NULL);
+    misc_deregister(&watchpoints_misc);
+    pr_info("module successfully unloaded\n");
 }
 
 
 static int
 proc_display(struct seq_file *m, void *v) {
 
-  addr_list *entry = (struct addr_list *) m->private;
+    wp_list_unit_t *unit = (wp_list_unit_t *) m->private;
 
-  seq_printf(m, "Watchpoint on <0x%llx> of size <%lld>.",
-    entry->event->attr.bp_addr, entry->event->attr.bp_len);
+    seq_printf(m, "Watchpoint on <0x%llx> of size <%lld>.",
+        unit->active->attr.bp_addr, unit->active->attr.bp_len);
 
-  return 0;
+    return 0;
 }
 
 static int
 proc_open(struct inode *inode, struct file *file) {
 
-  return single_open(file, proc_display, PDE_DATA(inode));
+    return single_open(file, proc_display, PDE_DATA(inode));
 }
 
 static int
 proc_init(void) {
 
-  kmodule_context *proc;
-  proc_dir_entry *pid_entry;
-  addr_list *entry;
-  uint8_t pid_name[30];
-  uint64_t pid;
-  uint32_t hval;
+    proc_context_t *proc;
+    struct proc_dir_entry *pid_entry;
+    uint8_t pid_name[30];
+    int i;
 
-  proc = kmalloc(sizeof(*proc), 0);
-  entry = kmalloc(sizeof(*entry), 0);
-  // spin_lock_init(entry->lock);
-  INIT_LIST_HEAD(&entry->head);
+    if (current->pid > MAX_PIDS) {
+        pr_info("PID too large.\n");
+        return -EINVAL;
+    }
 
-  sprintf(pid_name, "%d", current->pid);
-  pid_entry = proc_mkdir(pid_name, proc_watchpoints);
-  proc->proc_entry = pid_entry;
-  proc->pid = current->pid;
-  proc->addresses = entry;
-  INIT_LIST_HEAD(&proc->head);
-  // spin_lock_init(proc->lock);
+    proc = wpcontext.traced_pids[current->pid];
+    if (proc != NULL) {
+        return 0;
+    }
 
-  pid = current->pid;
-  hval = fnv_hash(pid);
-  tracked_pids[hval] = proc;
+    proc = kmalloc(sizeof(*proc), 0);
+    proc->pid = current->pid;
+    sprintf(pid_name, "%d", current->pid);
+    pid_entry = proc_mkdir(pid_name, proc_watchpoints);
+    proc->proc_entry = pid_entry;
+    proc->pid = current->pid;
+    proc->no_active = 0;
+    for (i = 0; i < INTEL_HW_WP; ++i) {
+        wplist_init(&(proc->watched[i]));
+    }
+    wpcontext.traced_pids[current->pid] = proc;
+    ++wpcontext.no_entries;
 
-  return 0;
+    return 0;
 }
 
 static int
-addr_list_add(struct perf_event *event, uint64_t user_buff) {
+proc_crash(struct inode *ind, struct file *fl) {
 
-  // TODO: check return values + pr_debug("[kernel-space]: ... ");
-  kmodule_context *tracked_pid;
-  addr_list *entry;
-  uint32_t hval;
-  uint64_t pid = current->pid;
-
-  entry = kmalloc(sizeof(*entry), 0);
-  entry->event = event;
-  entry->nr_accesses = 0;
-  entry->user_buff = user_buff;
-  // spin_lock_init(entry->lock);
-
-  hval = fnv_hash(pid);
-  if (tracked_pids[hval] == NULL) {
-    // pr_err("[kernel]: [error]: NULL pid entry for %d", (int)current->pid);
-    return -1;
-  }
-  tracked_pid = tracked_pids[hval];
-  //spin_lock(tracked_pid->lock);
-  list_add(&(entry->head), &(tracked_pid->addresses->head));
-  //spin_unlock(tracked_pid->lock);
-
-  return 0;
+    // pr_info("PID %d crashed. Cleaning up.\n", current->pid);
+    proc_free(current->pid);
+    return 0;
 }
 
-addr_list *
-addr_list_get(uint64_t addr) {
+static int
+proc_free(int pid) {
 
-  kmodule_context *tracked_pid;
-  addr_list *entry, *temp;
-  int wp_regs;
-  uint32_t hval;
-  uint64_t pid = current->pid;
+    uint8_t pid_name[30];
 
-  hval = fnv_hash(pid);
-
-  if (tracked_pids[hval] == NULL) {
-    pr_err("[kernel]: [error]: NULL pid entry for %d", (int)current->pid);
-    return NULL;
-  }
-  tracked_pid = tracked_pids[hval];
-
-  //spin_lock(tracked_pid->lock);
-  wp_regs = 0;
-  list_for_each_entry_safe(entry, temp, &(tracked_pid->addresses->head), head) {
-
-    if (entry->event->attr.bp_addr == addr) {
-      //spin_unlock(tracked_pid->lock);
-      return entry;
+    if (wpcontext.traced_pids[pid] == NULL) {
+        return 0;
     }
-  }
-  //spin_unlock(tracked_pid->lock);
 
-  return NULL;
+    sprintf(pid_name, "%d", pid);
+    remove_proc_entry(pid_name, proc_watchpoints);
+    wplist_free(wpcontext.traced_pids[pid]);
+
+    kfree(wpcontext.traced_pids[pid]);
+    wpcontext.traced_pids[pid] = NULL;
+
+    return 0;
 }
 
 
 static void
+wplist_init(wp_list_unit_t *unit) {
+
+    unit->active = NULL;
+    unit->num_traps = 0;
+    unit->itrace_ptr = 0;
+}
+
+static int
+wplist_add(struct perf_event *event, uint64_t itrace_ptr) {
+
+    // TODO: check return values + pr_debug(" ... ");
+    wp_list_unit_t *unit;
+    proc_context_t *proc;
+
+    proc = wpcontext.traced_pids[current->pid];
+    if (proc == NULL) {
+        pr_info("PID [%d] currently not traced.\n", current->pid);
+        return -EINVAL;
+    }
+
+    if (proc->no_active == INTEL_HW_WP) {
+        pr_info("Hardware breakpoints resources full\n");
+        return -EBUSY;
+    }
+
+    unit = &(proc->watched[proc->no_active]);
+    unit->active = event;
+    unit->num_traps = 0;
+    unit->itrace_ptr = itrace_ptr;
+    ++proc->no_active;
+
+    return 0;
+}
+
+static wp_list_unit_t *
+wplist_search(uint64_t addr) {
+
+    proc_context_t *proc;
+    int i;
+
+    proc = wpcontext.traced_pids[current->pid];
+    if (proc == NULL) {
+        pr_err("[error]: NULL pid unit for %d", (int)current->pid);
+        return NULL;
+    }
+
+    for (i = 0; i < INTEL_HW_WP; ++i) {
+
+        if (proc->watched[i].active == NULL) {
+            continue;
+        }
+        if (proc->watched[i].active->attr.bp_addr == addr) {
+            return &(proc->watched[i]);
+        }
+    }
+
+    return NULL;
+}
+
+static int
+wplist_modify(wp_list_unit_t *unit, struct perf_event_attr *attr, uint64_t ptr) {
+
+    unit->active->attr.bp_addr = attr->bp_addr;
+    unit->active->attr.bp_len  = attr->bp_len;
+    unit->active->attr.bp_type = attr->bp_type;
+    unit->itrace_ptr = ptr;
+
+    return 0;
+}
+
+
+static void
+wplist_clean(wp_list_unit_t *unit) {
+
+    if (unit->active != NULL) {
+        unregister_hw_breakpoint(unit->active);
+        unit->active = NULL;
+    }
+    unit->num_traps = 0;
+    unit->itrace_ptr = 0;
+}
+
+static void
+wplist_free(proc_context_t *proc) {
+
+    int i;
+
+    if (proc == NULL) {
+        return;
+    }
+
+    for (i = 0; i < INTEL_HW_WP; ++i) {
+        wplist_clean(&proc->watched[i]);
+    }
+
+    return;
+}
+
+static void
 watchpoint_handler(struct perf_event *bp, struct perf_sample_data *data, struct pt_regs *regs) {
 
-  addr_list *entry;
-  wp_msg_t wp;
-  uint64_t pc, dereg = -1;
+    int ret;
+    wp_list_unit_t *unit;
+    watchpoint_t modif, zero;
+    uint64_t pc;
 
-  // TODO: check return values + pr_debug("[kernel-space]: ... ");
+    // TODO: check return values + pr_debug("... ");
 
-  pc = (uint64_t)regs->ip;
-  entry = addr_list_get(bp->attr.bp_addr);
+    zero.addr = zero.len = 0;
+    pc = (uint64_t)regs->ip;
+    unit = wplist_search(bp->attr.bp_addr);
 
-  //spin_lock(entry->lock);
-  if (entry == NULL) {
-    // pr_err("[kernel-space]: No watchpoint on address <0x%llx>.\n", (uint64_t)bp->attr.bp_addr);
+    if (unit == NULL) {
+        pr_err("[error]: No watchpoint to modify at <0x%llx> (pid: %d).\n",
+            (uint64_t)bp->attr.bp_addr, (int)current->pid);
+        return;
+    }
+
+    if (unit->num_traps == MAX_TRAPS) {
+
+        modif.addr = bp->attr.bp_addr;
+        modif.len  = bp->attr.bp_len;
+        pc = INF64;
+        ret = copy_to_user((__user void *)unit->itrace_ptr, &pc, sizeof(pc));
+        unit->itrace_ptr += sizeof(pc);
+        // pr_err("[warning]: Modifying watchpoint at <0x%llx> (pid: %d)", modif.addr, current->pid);
+        watchpoint_modify(&zero, &modif, 0);
+        unit->num_traps = 0;
+
+    } else {
+
+        if (unit->itrace_ptr > 0) {
+            ret = copy_to_user((__user void *)unit->itrace_ptr, &pc, sizeof(pc));
+            unit->itrace_ptr += sizeof(pc);
+            ++unit->num_traps;
+        }
+    }
+
     return;
-  }
-
-  // pr_info("[kernel-space]: Watchpoint fired on address <0x%llx>.\n", (uint64_t)bp->attr.bp_addr);
-
-  if (entry->nr_accesses == MAX_WP_TRAPS) {
-
-    wp.data_ptr = bp->attr.bp_addr;
-    wp.data_size = bp->attr.bp_len;
-    copy_to_user((__user void *)entry->user_buff, &dereg, sizeof(dereg));
-    entry->user_buff += sizeof(dereg);
-    watchpoint_remove(&wp);
-
-  } else {
-    copy_to_user((__user void *)entry->user_buff, &pc, sizeof(pc));
-    entry->user_buff += sizeof(pc);
-    entry->nr_accesses++;
-  }
-  //spin_unlock(entry->lock);
-
-  return;
 }
 
 static struct perf_event *
-initialize_watchpoint(wp_msg_t *wp, pid_t pid) {
+watchpoint_init(watchpoint_t *set, pid_t pid) {
 
-  struct perf_event *perf_watchpoint;
-  struct task_struct *tsk;
-  struct perf_event_attr attr;
+    struct perf_event *perf_watchpoint;
+    struct task_struct *tsk;
+    struct perf_event_attr attr;
 
-  // TODO: check return values + pr_debug("[kernel-space]: ... ");
+    // TODO: check return values + pr_debug("... ");
 
-  /* Initialize watchpoint */
-  hw_breakpoint_init(&attr);
-  attr.bp_addr = wp->data_ptr;
-  attr.bp_len = 1; //MEM_ALIGN(&wp->data_ptr, wp->data_size);
-  attr.bp_type = HW_BREAKPOINT_R | HW_BREAKPOINT_W;
+    /* Initialize watchpoint */
+    hw_breakpoint_init(&attr);
+    attr.bp_addr = set->addr;
+    attr.bp_len  = 1;
+    attr.bp_type = HW_BREAKPOINT_R | HW_BREAKPOINT_W;
 
-  tsk = pid_task(find_vpid(pid), PIDTYPE_PID);
+    tsk = pid_task(find_vpid(pid), PIDTYPE_PID);
 
-  perf_watchpoint =
-      register_user_hw_breakpoint(&attr, watchpoint_handler, NULL, tsk);
+    perf_watchpoint =
+            register_user_hw_breakpoint(&attr, watchpoint_handler, NULL, tsk);
 
-  if (IS_ERR(perf_watchpoint)) {
-    pr_err("[kernel]: [error]: Cannot set watchpoint on %llx, size %llu, pid %d (code %ld).\n",
-      attr.bp_addr, attr.bp_len, (int)pid, PTR_ERR(perf_watchpoint));
-    return NULL;
-  }
+    if (IS_ERR(perf_watchpoint)) {
+        pr_err("[error]: code %ld: Cannot set watchpoint on <%llx> (pid: %d).\n",
+            PTR_ERR(perf_watchpoint), attr.bp_addr, (int)current->pid);
+        return NULL;
+    }
 
-  return perf_watchpoint;
+    return perf_watchpoint;
 }
 
 static int
-watchpoint_add(wp_msg_t *wp, uint64_t user_buff) {
+watchpoint_add(watchpoint_t *set, uint64_t itrace_ptr) {
 
-  struct perf_event *perf_watchpoint;
-  int rval;
+    struct perf_event *perf_watchpoint;
+    int ret;
 
-  // TODO: check return values + pr_debug("[kernel-space]: ... ");
+    // TODO: check return values + pr_debug("... ");
 
-  if (addr_list_get(wp->data_ptr) != NULL) {
-    pr_info("[kernel]: Breakpoint already set on <0x%llx>", wp->data_ptr);
-    return -1;
-  }
+    if (wplist_search(set->addr) != NULL) {
+        pr_debug("[warning]: Watchpoint already set on <0x%llx>", set->addr);
+        return -ENXIO;
+    }
 
-  perf_watchpoint = initialize_watchpoint(wp, current->pid);
+    /* Attempt to add a new watchpoint */
+    perf_watchpoint = watchpoint_init(set, current->pid);
+    if (perf_watchpoint == NULL) {
+        pr_err("[error]: Cannot add watchpoint at <0x%llx> (pid: %d)",
+            set->addr, (int)current->pid);
+        return -EPERM;
+    }
 
-  if (perf_watchpoint == NULL) {
-    return -1;
-  }
+    /* Update bookeeping */
+    ret = wplist_add(perf_watchpoint, itrace_ptr);
+    if (ret < 0) {
+        return ret;
+    }
 
-  rval = addr_list_add(perf_watchpoint, user_buff);
-  if (rval < 0) {
-    return -1;
-  }
+#ifdef DEBUG
+    wplist_print();
+#endif
 
-  return 0;
+    return 0;
 }
 
 static int
-watchpoint_modify(wp_msg_t *wp_old, wp_msg_t *wp_new) {
+watchpoint_modify(watchpoint_t *set, watchpoint_t *modif, uint64_t ptr) {
 
-  addr_list *entry;
-  struct perf_event_attr attr;
-  int rval;
+    wp_list_unit_t *unit;
+    struct perf_event_attr attr;
+    int ret;
 
-  if (wp_old == NULL || wp_old->data_ptr == 0) {
-    pr_err("[kernel-space]: [error]: Invalid address.\n");
-    return -1;
-  }
+    /* Check for invalid data */
+    if (set == NULL || modif == NULL) {
+        pr_err("[error]: Invalid watchpoint\n");
+        return -EINVAL;
+    }
 
-  entry = addr_list_get(wp_old->data_ptr);
-  if (entry == NULL) {
-    pr_info("[kernel]: [error]: No watchpoint on address 0x%llx.\n", wp_old->data_ptr);
-    return -1;
-  }
+    /* Search for active watchpoints at $addr */
+    unit = wplist_search(modif->addr);
+    if (unit == NULL) {
+        pr_err("[error]: No watchpoint on <0x%llx> (pid: %d)\n", modif->addr, current->pid);
+        return -ENOENT;
+    }
 
-  if (entry->event == NULL) {
-    pr_info("[kernel]: Empty perf_event structure for 0x%llx", wp_old->data_ptr);
-  }
+    /* Check current watchpoint struct */
+    if (unit->active == NULL) {
+        pr_err("[error]: Empty perf_event structure for <0x%llx>", modif->addr);
+        return -EFAULT;
+    }
 
-  attr.bp_addr = wp_new->data_ptr;
-  attr.bp_len = 1; //MEM_ALIGN(&wp->data_ptr, wp->data_size);
-  attr.bp_type = HW_BREAKPOINT_R | HW_BREAKPOINT_W;
-  rval = modify_user_hw_breakpoint(entry->event, &attr);
+    /* Attempt to modify the active watchpoint */
+    attr.bp_addr = set->addr;
+    attr.bp_len  = 1;
+    attr.bp_type = HW_BREAKPOINT_R | HW_BREAKPOINT_W;
+    ret = modify_user_hw_breakpoint(unit->active, &attr);
 
-  if (rval != 0) {
-    return -1;
-  }
+    if (ret != 0) {
+        return -EPERM;
+    }
 
-  list_del(&entry->head);
-  kfree(entry);
+    /* Update bookeeping */
+    wplist_modify(unit, &attr, ptr);
 
-  return 0;
+#ifdef DEBUG
+    wplist_print();
+#endif
+
+    return 0;
 }
 
 
 static int
-watchpoint_remove(wp_msg_t *wp) {
+watchpoint_remove(watchpoint_t *set) {
 
-  addr_list *entry;
+    wp_list_unit_t *unit;
 
-  if (wp == NULL || wp->data_ptr == 0) {
-    // pr_err("[kernel-space]: [error]: Invalid address.\n");
-    return -1;
-  }
+    /* Check for invalid data */
+    if (set == NULL) {
+        pr_err("[error]: Attempting to remove an invalid address\n");
+        return -EINVAL;
+    }
 
-  entry = addr_list_get(wp->data_ptr);
-  if (entry == NULL) {
-    pr_info("[kernel]: [error]: No watchpoint on address 0x%llx.\n", wp->data_ptr);
-    return -1;
-  }
+    /* Search for active watchpoints at $addr */
+    unit = wplist_search(set->addr);
+    if (unit == NULL) {
+        pr_debug("[warning]: No watchpoint on address <0x%llx>\n", set->addr);
+        return -ENOENT;
+    }
 
-  if (entry->event == NULL) {
-    pr_info("[kernel]: Empty perf_event structure for 0x%llx", wp->data_ptr);
-  }
+    /* Check current watchpoint struct */
+    if (unit->active == NULL) {
+        pr_err("[error]: Empty perf_event structure for <0x%llx>", set->addr);
+        return -EFAULT;
+    }
 
-  unregister_hw_breakpoint(entry->event);
+    /* Unregister watchpoint and update bookeeping */
+    wplist_clean(unit);
+    --wpcontext.traced_pids[current->pid]->no_active;
 
-  list_del(&entry->head);
-  kfree(entry);
-
-  return 0;
+    return 0;
 }
 
 static long
 watchpoint_ioctl(struct file *file, unsigned int cmd, unsigned long user_msg) {
 
-  usr_msg_t usr;
-  int rval;
-  uint64_t pid;
-  uint32_t hval;
+    ioctl_t msg;
+    int ret;
 
-  rval = copy_from_user(&usr, (void *)user_msg, sizeof(usr));
-  if (rval != 0 && cmd != CLEAN_KMODULE) {
-    pr_err("[kernel]: Cannot copy ioctl message from user (%llx, %d): %d.\n",
-     (uint64_t)(void *)user_msg, cmd, rval);
-    return -EINVAL;
-  }
+    ret = copy_from_user(&msg, (void *)user_msg, sizeof(msg));
+    if (ret != 0 && cmd != CLEANUP) {
+        pr_err(" Cannot copy ioctl message from user (code %d).\n", ret);
+        return -EINVAL;
+    }
 
-  pid = current->pid;
-  hval = fnv_hash(pid);
-  if (tracked_pids[hval] == NULL) {
     proc_init();
-  }
 
-  // pr_err("[kernel-space]: cmd = %x, on <0x%llx> (size %u)\n",
-  //     cmd, (uint64_t)usr.wp.data_ptr, usr.wp.data_size);
+    switch (cmd) {
+        case WATCHPOINT_ADD:
+            ret = watchpoint_add(&msg.set, msg.itrace_ptr);
+            break;
+        case WATCHPOINT_MODIFY:
+            ret = watchpoint_modify(&msg.set, &msg.modif, msg.itrace_ptr);
+            break;
+        case WATCHPOINT_REMOVE:
+            ret = watchpoint_remove(&msg.set);
+            break;
+        case CLEANUP:
+            ret = proc_free(current->pid);
+            break;
+        default:
+            pr_err("Invalid command %d\n", cmd);
+            ret = -EINVAL;
+            break;
+    }
 
-  // pr_info("[kernel]: Active watchpoints: %d\n", no_watchpoints);
-
-  switch (cmd) {
-    case ADD_WATCHPOINT:
-      rval = watchpoint_add(&usr.wp, usr.user_buff);
-      // pr_err("[kernel]: Done adding with outcome %ld\n", rval);
-      break;
-    case MODIFY_WATCHPOINT:
-      rval = watchpoint_modify(&usr.wp, NULL);
-      break;
-    case REMOVE_WATCHPOINT:
-      rval = watchpoint_remove(&usr.wp);
-      // pr_err("[kernel]: Done removing with outcome %ld\n", rval);
-      break;
-    case CLEAN_KMODULE:
-      rval = clean_kmodule_context();
-      break;
-    default:
-      // pr_err("[kernel-space]: Watchpoints was sent an unknown command %d\n", cmd);
-      rval = -EINVAL;
-      break;
-  }
-
-#ifdef DEBUG_PRINT
-  // pr_err("[kernel-space]: Done removing with outcome %d\n", (int)rval);
-#endif
-
-  return rval;
-}
-
-static int
-clean_addr_list(addr_list *addresses) {
-
-  addr_list *entry;
-  addr_list *temp;
-  size_t memory_used = 0;
-
-  // TODO: check return values + pr_debug("[kernel-space]: ... ");
-
-  if (addresses == NULL) {
-    return memory_used;
-  }
-
-  list_for_each_entry_safe(entry, temp, &addresses->head, head) {
-
-    memory_used += ksize(entry);
-    list_del(&entry->head);
-    kfree(entry);
-  }
-
-  return memory_used;
-}
-
-static int
-clean_kmodule_context(void) {
-
-  kmodule_context *pid_list;
-  kmodule_context *temp;
-  size_t memory_used = 0, per_pid = 0;
-  uint64_t pid, hval;
-
-  // TODO: check return values + pr_debug("[kernel-space]: ... ");
-  pid = current->pid;
-  hval = fnv_hash(pid);
-  if (tracked_pids[hval] == NULL) {
-    return 0;
-  }
-  list_for_each_entry_safe(pid_list, temp, &tracked_pids[hval]->head, head) {
-    uint8_t pid_name[30];
-
-    per_pid = clean_addr_list(pid_list->addresses);
-    memory_used += per_pid;
-
-    sprintf(pid_name, "%d", pid_list->pid);
-    remove_proc_entry(pid_name, proc_watchpoints);
-
-    memory_used += ksize(pid_list);
-    list_del(&pid_list->head);
-    kfree(pid_list);
-  }
-  tracked_pids[hval]->pid = -1;
-  // pr_err("%lu bytes freed\n", memory_used);
-
-  return 0;
+    return ret;
 }
