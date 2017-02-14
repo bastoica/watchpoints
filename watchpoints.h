@@ -9,18 +9,17 @@
 #define INTEL_HW_WP  (4)
 #define MAX_PIDS (65536)
 
-#define HBITS               (16)
-#define FNV_MULT            (16777619)
-#define FNV_INIT            (2166136261)
+#define HBITS    (16)
+#define FNV_MULT (16777619)
+#define FNV_INIT (2166136261)
 
-#define WATCHPOINT_ADD      (0x1000)
-#define WATCHPOINT_MODIFY   (0x2000)
-#define WATCHPOINT_REMOVE   (0x4000)
-#define CLEANUP             (0x8000)
+#define WATCHPOINT_ADD    (0x1000)
+#define WATCHPOINT_MODIFY (0x2000)
+#define WATCHPOINT_REMOVE (0x4000)
+#define CLEANUP  (0x8000)
 
-#define INF64               (0xFFFFFFFFFFFFFFFFL)
-
-#define MAX_TRAPS           (100)
+#define INF64 (0xFFFFFFFFFFFFFFFFL)
+#define MAX_TRAPS (100)
 
 /* Returns the minimum between two values */
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -31,36 +30,36 @@
 
 /* Tracing information per address */
 typedef struct _wp_list_unit_t {
-  struct perf_event *active;            /* active watchpoint */
-  uint num_traps;                       /* number of traps elapsed */
-  uint64_t itrace_ptr;                  /* user-space buffer to store PCs */
+    struct perf_event *active;            /* active watchpoint */
+    uint num_traps;                       /* number of traps elapsed */
+    uint64_t itrace_ptr;                  /* user-space buffer to store PCs */
 } wp_list_unit_t;
 
 /* Tracing information per process */
 typedef struct _proc_context_t {
-  pid_t pid;                            /* calling pid */
-  struct proc_dir_entry *proc_entry;    /* process directory unit in /proc */
-  wp_list_unit_t watched[INTEL_HW_WP];  /* list of traced addresses */
-  int no_active;                        /* no of active breakpoint registers */
+    pid_t pid;                            /* calling pid */
+    struct proc_dir_entry *proc_entry;    /* process directory unit in /proc */
+    wp_list_unit_t watched[INTEL_HW_WP];  /* list of traced addresses */
+    int no_active;                        /* no of active breakpoint registers */
 } proc_context_t;
 
 /* Watchpoint internal struct */
 typedef struct _watchpoint_t {
-  uint64_t addr;                        /* traced address */
-  uint32_t len;                         /* traced address size */
+    uint64_t addr;                        /* traced address */
+    uint32_t len;                         /* traced address size */
 } watchpoint_t;
 
 /* IOCTL message received form a process */
 typedef struct ioctl_t {
-  watchpoint_t set;                     /* watchpoint to add */
-  watchpoint_t modif;                   /* watchpoint to modify */
-  uint64_t itrace_ptr;                  /* user-space buffer to store PCs */
+    watchpoint_t set;                     /* watchpoint to add */
+    watchpoint_t modif;                   /* watchpoint to modify */
+    uint64_t itrace_ptr;                  /* user-space buffer to store PCs */
 } ioctl_t;
 
 
 typedef struct wpcontext_t {
-  proc_context_t *traced_pids[MAX_PIDS];
-  int no_entries;
+    proc_context_t *traced_pids[MAX_PIDS];
+    int no_entries;
 } wpcontext_t;
 
 

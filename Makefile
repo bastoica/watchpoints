@@ -1,8 +1,8 @@
 obj-m += watchpoints.o
 DEBUG_CFLAGS += -g -DDEBUG
 CFLAGS_watchpoints.o += -Wall -W -Werror -Wextra -Wno-unused-parameter
-ccflags-y += ${DEBUG_CFLAGS}
 CC += ${DEBUG_CFLAGS}
+ccflags-y += ${DEBUG_CFLAGS}
 
 release:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules;

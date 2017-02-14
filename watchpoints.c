@@ -184,7 +184,6 @@ proc_init(void) {
 static int
 proc_crash(struct inode *ind, struct file *fl) {
 
-    // pr_info("PID %d crashed. Cleaning up.\n", current->pid);
     proc_free(current->pid);
     return 0;
 }
@@ -335,7 +334,6 @@ watchpoint_handler(struct perf_event *bp, struct perf_sample_data *data, struct 
         pc = INF64;
         ret = copy_to_user((__user void *)unit->itrace_ptr, &pc, sizeof(pc));
         unit->itrace_ptr += sizeof(pc);
-        // pr_err("[warning]: Modifying watchpoint at <0x%llx> (pid: %d)", modif.addr, current->pid);
         watchpoint_modify(&zero, &modif, 0);
         unit->num_traps = 0;
 
