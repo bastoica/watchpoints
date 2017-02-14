@@ -1,6 +1,6 @@
 #!/bin/bash
 
-comp_mode=$1
+comp_mode=${1}
 
 make clean
 make $comp_mode
