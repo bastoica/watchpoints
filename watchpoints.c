@@ -314,6 +314,7 @@ watchpoint_handler(struct perf_event *bp, struct perf_sample_data *data, struct 
     wp_list_unit_t *unit;
     watchpoint_t modif, zero;
     uint64_t pc;
+    uint8_t bytes[18] = {0};
 
     // TODO: check return values + pr_debug("... ");
 
@@ -326,6 +327,16 @@ watchpoint_handler(struct perf_event *bp, struct perf_sample_data *data, struct 
             (uint64_t)bp->attr.bp_addr, (int)current->pid);
         return;
     }
+
+    copy_from_user(&bytes, (void *)pc-12, sizeof(bytes));
+
+    // pr_info("addr=%llx, ip=%llx", (uint64_t)bp->attr.bp_addr, (uint64_t)regs->ip);
+
+    // printk("%llx %llx", (uint64_t)bp->attr.bp_addr, (uint64_t)regs->ip);
+    // for (i = 0; i < 18; ++i) {
+    //     printk(" %02x", bytes[i]);
+    // }
+    // printk("\n");
 
     if (unit->num_traps == MAX_TRAPS) {
 
@@ -495,11 +506,21 @@ watchpoint_ioctl(struct file *file, unsigned int cmd, unsigned long user_msg) {
 
     ioctl_t msg;
     int ret;
+    uint64_t stack_low, stack_hi;
 
     ret = copy_from_user(&msg, (void *)user_msg, sizeof(msg));
-    if (ret != 0 && cmd != CLEANUP) {
+    if (ret != 0 && cmd != CLEANUP && cmd != 0xFFFFFFFF) {
         pr_err(" Cannot copy ioctl message from user (code %d).\n", ret);
         return -EINVAL;
+    }
+
+    stack_hi = ALIGN_TO_PAGE(current->mm->start_stack, PAGE_SIZE);
+    stack_low =  stack_hi - STACK_NUM_PAGES * PAGE_SIZE;
+
+    // pr_info("addr=%llx, cmd=%x, stack_low=%llx, stack_hi=%llx",
+    //     (uint64_t)msg.set.addr, cmd, stack_low, stack_hi);
+    if ((uint64_t)msg.set.addr >= stack_low && (uint64_t)msg.set.addr <= stack_hi) {
+        return -606;
     }
 
     proc_init();
@@ -518,7 +539,8 @@ watchpoint_ioctl(struct file *file, unsigned int cmd, unsigned long user_msg) {
             ret = proc_free(current->pid);
             break;
         default:
-            pr_err("Invalid command %d\n", cmd);
+            // pr_err("Invalid command %d\n", cmd);
+            // printk("-|\n");
             ret = -EINVAL;
             break;
     }

@@ -5,6 +5,10 @@
  * Macros declaration
  */
 
+#define STACK_NUM_PAGES (31)    // ulimit
+
+#define ALIGN_TO_PAGE(addr, page) ( (uint64_t)((addr + page - 1) / page) * page )
+
 /* on x86_64 there are only 4 watchpoints */
 #define INTEL_HW_WP  (4)
 #define MAX_PIDS (65536)
